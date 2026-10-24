@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BTC Tracker</title>
+  <meta name="description" content="Cotizacion de Bitcoin en tiempo real">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="card" aria-live="polite">
+    <header class="top">
+      <div class="brand">
+        <img src="favicon.svg" alt="" width="28" height="28">
+        <span>BTC Tracker</span>
+      </div>
+      <nav class="currencies" aria-label="Moneda">
+        <button type="button" data-cur="usd" class="active">USD</button>
+        <button type="button" data-cur="eur">EUR</button>
+        <button type="button" data-cur="ars">ARS</button>
+      </nav>
+    </header>
+
+    <p class="label">Bitcoin · precio actual</p>
+    <p id="price" class="price">—</p>
+    <p id="change" class="change">Cargando…</p>
+
+    <svg id="spark" class="spark" viewBox="0 0 300 70" preserveAspectRatio="none" aria-label="Evolucion en esta sesion">
+      <polyline id="spark-line" points=""></polyline>
+    </svg>
+
+    <footer class="meta">
+      <span id="updated">Ultima actualizacion: —</span>
+      <span id="status" class="status">●</span>
+    </footer>
+  </main>
+  <p class="foot">Datos: CoinGecko · se actualiza cada 30 s · <a href="/metrics">/metrics</a> · <a href="/health">/health</a></p>
+  <script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: btc-tracker
+
+scrape_configs:
+  - job_name: btc-tracker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["btc-tracker:3000"]
+        labels:
+          service: btc-tracker
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,435 @@
+# =============================================================================
+# Proyecto 1 - CI/CD con GitHub Actions + Terraform + Docker
+# Aplicacion: BTC Tracker (pagina web con la cotizacion de Bitcoin)
+#
+# Etapas:
+#   1. build-test   -> lint (ESLint), tests (Jest + cobertura), npm audit, SBOM npm
+#   2. sonarqube    -> analisis estatico + Quality Gate (SonarQube Cloud)
+#   3. snyk         -> SCA de dependencias + SAST (Snyk Code)
+#   4. iac          -> terraform fmt/validate + Snyk IaC
+#   5. docker       -> build imagen, escaneo (Grype + Snyk Container), SBOM
+#                      CycloneDX/SPDX, artefacto .tar.gz, push a GHCR
+#   6. deploy       -> terraform apply (app + Prometheus + Grafana), smoke tests,
+#                      captura del dashboard y terraform destroy (entorno efimero)
+#   7. deploy-vm    -> (opcional) despliegue persistente en la VM de VirtualBox
+#                      mediante un runner self-hosted
+#
+# Secrets requeridos (Settings > Secrets and variables > Actions):
+#   SONAR_TOKEN, SNYK_TOKEN               (si faltan, el paso se omite con aviso)
+#   GRAFANA_ADMIN_PASSWORD                (solo para deploy-vm)
+# Variables opcionales:
+#   SONAR_HOST_URL (por defecto https://sonarcloud.io)
+#   DEPLOY_TO_VM = 'true' para habilitar el job deploy-vm
+# =============================================================================
+name: CI/CD BTC Tracker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  TF_VERSION: "1.17.0"
+  LOCAL_IMAGE: btc-tracker:ci
+  TF_DIR: terraform/local
+
+jobs:
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: Build, lint y tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Tests unitarios + cobertura (Jest)
+        run: npm test
+
+      - name: Auditoria de dependencias (npm audit)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: SBOM de dependencias (CycloneDX)
+        run: npm run sbom
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom-npm
+          path: sbom/sbom-npm.cdx.json
+
+  # ---------------------------------------------------------------------------
+  sonarqube:
+    name: SonarQube (calidad + Quality Gate)
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # historial completo para el analisis de "new code"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage
+          path: coverage/
+
+      - name: Verificar SONAR_TOKEN
+        id: check
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning::SONAR_TOKEN no configurado: se omite el analisis de SonarQube"; fi
+
+      - name: Analisis SonarQube
+        if: steps.check.outputs.enabled == 'true'
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+
+  # ---------------------------------------------------------------------------
+  snyk:
+    name: Snyk (dependencias + codigo)
+    runs-on: ubuntu-latest
+    needs: build-test
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Verificar SNYK_TOKEN
+        id: check
+        run: |
+          if [ -n "$SNYK_TOKEN" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning::SNYK_TOKEN no configurado: se omiten los escaneos de Snyk"; fi
+
+      - name: Instalar dependencias y Snyk CLI
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          npm ci
+          npm install -g snyk
+
+      - name: Snyk Open Source (SCA)
+        if: steps.check.outputs.enabled == 'true'
+        run: snyk test --severity-threshold=high --sarif-file-output=snyk-deps.sarif
+
+      - name: Snyk Code (SAST)
+        if: steps.check.outputs.enabled == 'true'
+        # Requiere habilitar Snyk Code en la organizacion de Snyk
+        continue-on-error: true
+        run: snyk code test --severity-threshold=high
+
+      - name: Monitorear proyecto en Snyk (solo main)
+        if: steps.check.outputs.enabled == 'true' && github.ref == 'refs/heads/main'
+        run: snyk monitor --project-name=btc-tracker
+
+  # ---------------------------------------------------------------------------
+  iac:
+    name: Terraform (fmt, validate, Snyk IaC)
+    runs-on: ubuntu-latest
+    needs: build-test
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: Snyk IaC
+        if: env.SNYK_TOKEN != ''
+        run: npx --yes snyk iac test . --severity-threshold=high
+
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker (build, escaneo, SBOM, push)
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    permissions:
+      contents: read
+      packages: write          # push a GitHub Container Registry
+      security-events: write   # subir SARIF a la pestana Security
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Nombre de la imagen en GHCR
+        run: echo "REGISTRY_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/btc-tracker" >> "$GITHUB_ENV"
+
+      - name: Build de la imagen
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prueba rapida del contenedor
+        run: |
+          docker run -d --name smoke -p 3000:3000 --read-only --cap-drop ALL "$LOCAL_IMAGE"
+          for i in $(seq 1 20); do curl -fs http://localhost:3000/health && break; sleep 1; done
+          curl -fs http://localhost:3000/metrics | grep -q http_requests_total
+          docker rm -f smoke
+
+      - name: Escaneo de vulnerabilidades de la imagen (Grype)
+        id: grype
+        uses: anchore/scan-action@v7
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          fail-build: true
+          severity-cutoff: critical
+          output-format: sarif
+
+      - name: Subir resultados de Grype a GitHub Security
+        if: always() && steps.grype.outputs.sarif != ''
+        continue-on-error: true   # requiere code scanning habilitado en el repo
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: grype
+
+      - name: Snyk Container
+        if: env.SNYK_TOKEN != ''
+        run: npx --yes snyk container test "$LOCAL_IMAGE" --file=Dockerfile --severity-threshold=critical
+
+      - name: SBOM de la imagen (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: cyclonedx-json
+          output-file: sbom/sbom-image.cdx.json
+          upload-artifact: false
+
+      - name: SBOM de la imagen (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: sbom/sbom-image.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom-image
+          path: sbom/
+
+      - name: Exportar imagen como artefacto (.tar.gz)
+        run: docker save "$LOCAL_IMAGE" | gzip > btc-tracker-image.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: docker-image
+          path: btc-tracker-image.tar.gz
+          retention-days: 7
+
+      - name: Metadatos de la imagen (tags)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Login a GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push a GHCR (con SBOM y provenance adjuntos)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          sbom: true
+          provenance: mode=max
+
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy con Terraform + monitoreo (entorno efimero)
+    runs-on: ubuntu-latest
+    needs: [docker, iac, sonarqube, snyk]
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image
+
+      - name: Cargar imagen generada
+        run: gunzip -c btc-tracker-image.tar.gz | docker load
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Password temporal de Grafana
+        run: |
+          PASS="$(openssl rand -base64 24)"
+          echo "::add-mask::$PASS"
+          echo "TF_VAR_grafana_admin_password=$PASS" >> "$GITHUB_ENV"
+
+      - name: terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: >
+          terraform plan -input=false -out=tfplan
+          -var="environment=ci"
+          -var="app_image=${LOCAL_IMAGE}"
+          -var="grafana_anonymous_viewer=true"
+
+      - name: terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Smoke tests
+        run: |
+          set -e
+          curl -fsS http://localhost:3000/health
+          curl -fsS http://localhost:3000/ | grep -q "BTC Tracker"
+          curl -fsS http://localhost:3000/metrics | grep -q btc_upstream_requests_total
+          for i in $(seq 1 30); do curl -fsS http://localhost:9090/-/ready && break; sleep 2; done
+          for i in $(seq 1 30); do curl -fsS http://localhost:3001/api/health && break; sleep 2; done
+          echo "Target de Prometheus:"
+          curl -fsS 'http://localhost:9090/api/v1/query?query=up%7Bjob%3D%22btc-tracker%22%7D'
+
+      - name: Generar trafico para poblar las metricas (~2 min)
+        run: |
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://localhost:3000/
+            curl -s -o /dev/null http://localhost:3000/api/price
+            curl -s -o /dev/null http://localhost:3000/health
+            curl -s -o /dev/null http://localhost:3000/no-existe
+            sleep 2
+          done
+
+      - name: Capturas del dashboard de Grafana y de la web
+        run: |
+          mkdir -p capturas
+          npx --yes playwright@1 install --with-deps chromium
+          npx --yes playwright@1 screenshot --viewport-size=1600,1000 --wait-for-timeout=10000 \
+            "http://localhost:3001/d/btc-tracker?orgId=1&from=now-15m&to=now&kiosk" \
+            capturas/grafana-dashboard.png
+          npx --yes playwright@1 screenshot --viewport-size=1280,800 --wait-for-timeout=4000 \
+            "http://localhost:3000/" capturas/app-btc-tracker.png
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: capturas-dashboard
+          path: capturas/
+
+      - name: Logs de los contenedores
+        if: always()
+        run: docker ps -a && docker logs btc-ci-app --tail 50 || true
+
+      - name: terraform destroy
+        if: always()
+        working-directory: ${{ env.TF_DIR }}
+        run: >
+          terraform destroy -input=false -auto-approve
+          -var="environment=ci"
+          -var="app_image=${LOCAL_IMAGE}"
+
+  # ---------------------------------------------------------------------------
+  deploy-vm:
+    name: Deploy en VM VirtualBox (runner self-hosted)
+    runs-on: [self-hosted, linux, virtualbox]
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_TO_VM == 'true'
+    environment: local-vm
+    env:
+      TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: docker-image
+
+      - name: Cargar imagen y etiquetarla con el commit
+        run: |
+          gunzip -c btc-tracker-image.tar.gz | docker load
+          docker tag "$LOCAL_IMAGE" "btc-tracker:${GITHUB_SHA::7}"
+
+      - name: terraform init (estado persistente en la VM)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false -backend-config="path=/opt/btc-tracker/terraform.tfstate"
+
+      - name: terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: >
+          terraform apply -input=false -auto-approve
+          -var="environment=local"
+          -var="app_image=btc-tracker:${GITHUB_SHA::7}"
+
+      - name: Verificar despliegue
+        run: curl -fsS http://localhost:3000/health

@@ -1,0 +1,14 @@
+node_modules/
+coverage/
+.env
+.vagrant/
+*.zip
+*.tar.gz
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+terraform.tfvars

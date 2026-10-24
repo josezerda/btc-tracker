@@ -1,0 +1,63 @@
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --line: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --btc: #f7931a;
+  --up: #3fb950;
+  --down: #f85149;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px;
+  background: radial-gradient(circle at 50% 0%, #1f2630 0%, var(--bg) 60%);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .35);
+}
+
+.top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.brand { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+
+.currencies { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.currencies button {
+  background: transparent; color: var(--muted); border: 0; padding: 6px 10px;
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.currencies button.active { background: var(--btc); color: #111; font-weight: 600; }
+
+.label { margin: 0; color: var(--muted); font-size: 14px; }
+.price { margin: 4px 0; font-size: clamp(32px, 9vw, 48px); font-weight: 700; font-variant-numeric: tabular-nums; }
+.change { margin: 0 0 16px; font-weight: 600; color: var(--muted); }
+.change.up { color: var(--up); }
+.change.down { color: var(--down); }
+
+.spark { width: 100%; height: 70px; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); }
+.spark polyline { fill: none; stroke: var(--btc); stroke-width: 2; vector-effect: non-scaling-stroke; }
+
+.meta { display: flex; justify-content: space-between; margin-top: 12px; color: var(--muted); font-size: 13px; }
+.status { color: var(--up); }
+.status.stale { color: var(--btc); }
+.status.error { color: var(--down); }
+
+.foot { color: var(--muted); font-size: 12px; text-align: center; }
+.foot a { color: var(--muted); }
