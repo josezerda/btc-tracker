@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # ---------- Etapa 1: dependencias de produccion ----------
-FROM node:22-alpine AS deps
+FROM node:26.5.0-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # ---------- Etapa 2: imagen final (minima, sin herramientas de build) ----------
-FROM node:22-alpine AS runtime
+FROM node:26.5.0-alpine AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
