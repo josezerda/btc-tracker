@@ -1,6 +1,6 @@
 # Proyecto 1 — CI/CD con GitHub Actions + Terraform + Docker
 
-**Equipo:** EquipoX — Jose Antonio Zerda
+**GRUPO:** GRUPO 2 — Jose Antonio Zerda
 **Aplicacion:** BTC Tracker, una pagina web que muestra la cotizacion de Bitcoin (USD / EUR / ARS) en tiempo real,
 con la variacion de las ultimas 24 h. Generada con IA (Claude) y desplegada en contenedores Docker.
 
